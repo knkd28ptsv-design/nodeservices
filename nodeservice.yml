@@ -10,13 +10,13 @@
     systemd_exporter_version: "0.7.0"
     systemd_exporter_port: 9558
 
-    systemd_exporter_install_dir: "/usr/local/bin"
-    systemd_exporter_binary: "/usr/local/bin/systemd_exporter"
+    install_dir: "/usr/local/bin"
+    binary_path: "/usr/local/bin/systemd_exporter"
 
-    systemd_exporter_download_dir: "/tmp/systemd_exporter_install"
-    systemd_exporter_archive: "/tmp/systemd_exporter_install/systemd_exporter.tar.gz"
+    download_dir: "/tmp/systemd_exporter_install"
+    archive_path: "/tmp/systemd_exporter_install/systemd_exporter.tar.gz"
 
-    systemd_exporter_service: "/etc/systemd/system/systemd_exporter.service"
+    service_file: "/etc/systemd/system/systemd_exporter.service"
 
   tasks:
 
@@ -61,15 +61,16 @@
         that:
           - ansible_architecture in ['x86_64', 'amd64']
         fail_msg: "Unsupported architecture: {{ ansible_architecture }}"
+        success_msg: "Architecture {{ ansible_architecture }} is supported."
 
 
     # ============================================================
-    # CREATE TEMP DIRECTORY
+    # CREATE DOWNLOAD DIRECTORY
     # ============================================================
 
-    - name: Create temporary download directory
+    - name: Create download directory
       ansible.builtin.file:
-        path: "{{ systemd_exporter_download_dir }}"
+        path: "{{ download_dir }}"
         state: directory
         owner: root
         group: root
@@ -77,17 +78,55 @@
 
 
     # ============================================================
-    # DOWNLOAD SYSTEMD EXPORTER
+    # REMOVE OLD DOWNLOAD CONTENT
+    # ============================================================
+
+    - name: Remove old extraction directory
+      ansible.builtin.file:
+        path: "{{ download_dir }}/extracted"
+        state: absent
+
+
+    - name: Create extraction directory
+      ansible.builtin.file:
+        path: "{{ download_dir }}/extracted"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+
+    # ============================================================
+    # DOWNLOAD
     # ============================================================
 
     - name: Download systemd exporter
       ansible.builtin.get_url:
         url: "https://github.com/prometheus-community/systemd_exporter/releases/download/v{{ systemd_exporter_version }}/systemd_exporter-{{ systemd_exporter_version }}.linux-amd64.tar.gz"
-        dest: "{{ systemd_exporter_archive }}"
+        dest: "{{ archive_path }}"
         owner: root
         group: root
         mode: "0644"
         timeout: 120
+        force: true
+
+
+    # ============================================================
+    # VERIFY DOWNLOAD
+    # ============================================================
+
+    - name: Check downloaded archive
+      ansible.builtin.stat:
+        path: "{{ archive_path }}"
+      register: archive_status
+
+
+    - name: Verify archive exists
+      ansible.builtin.assert:
+        that:
+          - archive_status.stat.exists
+          - archive_status.stat.size > 0
+        fail_msg: "systemd exporter archive was not downloaded."
 
 
     # ============================================================
@@ -96,18 +135,60 @@
 
     - name: Extract systemd exporter
       ansible.builtin.unarchive:
-        src: "{{ systemd_exporter_archive }}"
-        dest: "{{ systemd_exporter_download_dir }}"
+        src: "{{ archive_path }}"
+        dest: "{{ download_dir }}/extracted"
         remote_src: true
 
 
     # ============================================================
-    # ENSURE INSTALL DIRECTORY
+    # SHOW EXTRACTED CONTENT
+    # ============================================================
+
+    - name: List extracted files
+      ansible.builtin.find:
+        paths: "{{ download_dir }}/extracted"
+        recurse: true
+        file_type: file
+      register: extracted_files
+
+
+    - name: Display extracted files
+      ansible.builtin.debug:
+        msg: "{{ extracted_files.files | map(attribute='path') | list }}"
+
+
+    # ============================================================
+    # FIND EXPORTER BINARY
+    # ============================================================
+
+    - name: Find systemd exporter executable
+      ansible.builtin.find:
+        paths: "{{ download_dir }}/extracted"
+        recurse: true
+        file_type: file
+        patterns:
+          - "systemd_exporter"
+          - "systemd_exporter-*"
+      register: exporter_files
+
+
+    - name: Verify exporter binary
+      ansible.builtin.assert:
+        that:
+          - exporter_files.files | length > 0
+        fail_msg: >
+          systemd_exporter binary was not found after extraction.
+          Check the extracted files shown in the previous task.
+        success_msg: "systemd_exporter binary found."
+
+
+    # ============================================================
+    # INSTALL DIRECTORY
     # ============================================================
 
     - name: Ensure /usr/local/bin exists
       ansible.builtin.file:
-        path: "{{ systemd_exporter_install_dir }}"
+        path: "{{ install_dir }}"
         state: directory
         owner: root
         group: root
@@ -118,25 +199,10 @@
     # INSTALL BINARY
     # ============================================================
 
-    - name: Find extracted systemd exporter binary
-      ansible.builtin.find:
-        paths: "{{ systemd_exporter_download_dir }}"
-        patterns: "systemd_exporter"
-        file_type: file
-      register: systemd_exporter_binary_files
-
-
-    - name: Verify extracted binary
-      ansible.builtin.assert:
-        that:
-          - systemd_exporter_binary_files.files | length > 0
-        fail_msg: "systemd_exporter binary was not found after extraction."
-
-
     - name: Install systemd exporter binary
       ansible.builtin.copy:
-        src: "{{ systemd_exporter_binary_files.files[0].path }}"
-        dest: "{{ systemd_exporter_binary }}"
+        src: "{{ exporter_files.files[0].path }}"
+        dest: "{{ binary_path }}"
         remote_src: true
         owner: root
         group: root
@@ -147,17 +213,31 @@
     # VERIFY BINARY
     # ============================================================
 
-    - name: Check systemd exporter version
+    - name: Check exporter binary
+      ansible.builtin.stat:
+        path: "{{ binary_path }}"
+      register: exporter_binary_status
+
+
+    - name: Verify exporter binary exists
+      ansible.builtin.assert:
+        that:
+          - exporter_binary_status.stat.exists
+          - exporter_binary_status.stat.executable
+        fail_msg: "systemd_exporter binary installation failed."
+        success_msg: "systemd_exporter binary installed successfully."
+
+
+    - name: Get exporter version
       ansible.builtin.command:
-        cmd: "{{ systemd_exporter_binary }} --version"
-      register: systemd_exporter_version_output
+        cmd: "{{ binary_path }} --version"
+      register: exporter_version_output
       changed_when: false
-      failed_when: false
 
 
-    - name: Display systemd exporter version
+    - name: Display exporter version
       ansible.builtin.debug:
-        var: systemd_exporter_version_output.stdout
+        var: exporter_version_output.stdout
 
 
     # ============================================================
@@ -166,7 +246,7 @@
 
     - name: Create systemd exporter service
       ansible.builtin.copy:
-        dest: "{{ systemd_exporter_service }}"
+        dest: "{{ service_file }}"
         owner: root
         group: root
         mode: "0644"
@@ -180,8 +260,7 @@
           [Service]
           Type=simple
 
-          ExecStart={{ systemd_exporter_binary }} \
-            --web.listen-address=0.0.0.0:{{ systemd_exporter_port }}
+          ExecStart={{ binary_path }} --web.listen-address=0.0.0.0:{{ systemd_exporter_port }}
 
           Restart=on-failure
           RestartSec=5
@@ -195,7 +274,7 @@
 
 
     # ============================================================
-    # SYSTEMD RELOAD
+    # RELOAD SYSTEMD
     # ============================================================
 
     - name: Reload systemd
@@ -204,7 +283,7 @@
 
 
     # ============================================================
-    # ENABLE SERVICE
+    # ENABLE AND START
     # ============================================================
 
     - name: Enable systemd exporter
@@ -213,10 +292,6 @@
         enabled: true
 
 
-    # ============================================================
-    # START SERVICE
-    # ============================================================
-
     - name: Start systemd exporter
       ansible.builtin.systemd:
         name: systemd_exporter
@@ -224,27 +299,28 @@
 
 
     # ============================================================
-    # CHECK SERVICE
+    # SERVICE STATUS
     # ============================================================
 
     - name: Get systemd exporter service status
       ansible.builtin.systemd:
         name: systemd_exporter
-      register: systemd_exporter_status
+      register: exporter_service_status
 
 
-    - name: Display service status
-      ansible.builtin.debug:
-        msg:
-          - "Service state : {{ systemd_exporter_status.status.ActiveState }}"
-          - "Enabled       : {{ systemd_exporter_status.status.UnitFileState }}"
+    - name: Verify systemd exporter is active
+      ansible.builtin.assert:
+        that:
+          - exporter_service_status.status.ActiveState == "active"
+        fail_msg: "systemd_exporter service is not active."
+        success_msg: "systemd_exporter service is active."
 
 
     # ============================================================
     # WAIT FOR PORT
     # ============================================================
 
-    - name: Wait for systemd exporter port
+    - name: Wait for exporter port
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ systemd_exporter_port }}"
@@ -253,32 +329,25 @@
 
 
     # ============================================================
-    # CHECK METRICS
+    # TEST METRICS
     # ============================================================
 
-    - name: Check systemd exporter metrics
+    - name: Check exporter metrics endpoint
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ systemd_exporter_port }}/metrics"
         method: GET
         status_code: 200
         timeout: 10
-
-
-    # ============================================================
-    # DISPLAY METRICS
-    # ============================================================
-
-    - name: Get systemd service metrics
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ systemd_exporter_port }}/metrics"
-        method: GET
         return_content: true
-      register: systemd_metrics
+      register: exporter_metrics
 
 
-    - name: Display systemd metrics sample
-      ansible.builtin.debug:
-        msg: "{{ systemd_metrics.content.split('\n') | select('search', 'systemd_unit_state') | list | first(20) }}"
+    - name: Verify systemd metrics are available
+      ansible.builtin.assert:
+        that:
+          - "'systemd' in exporter_metrics.content"
+        fail_msg: "Exporter is running but expected systemd metrics were not found."
+        success_msg: "Systemd metrics are available."
 
 
     # ============================================================
@@ -317,17 +386,17 @@
     # CLEANUP
     # ============================================================
 
-    - name: Remove temporary installation directory
+    - name: Remove temporary files
       ansible.builtin.file:
-        path: "{{ systemd_exporter_download_dir }}"
+        path: "{{ download_dir }}"
         state: absent
 
 
     # ============================================================
-    # FINAL STATUS
+    # FINAL RESULT
     # ============================================================
 
-    - name: Final systemd exporter status
+    - name: Display final result
       ansible.builtin.debug:
         msg:
           - "============================================================"
@@ -336,17 +405,13 @@
           - "Server       : {{ inventory_hostname }}"
           - "IP           : {{ ansible_host | default(inventory_hostname) }}"
           - "Version      : {{ systemd_exporter_version }}"
-          - "Binary       : {{ systemd_exporter_binary }}"
+          - "Binary       : {{ binary_path }}"
           - "Port         : {{ systemd_exporter_port }}"
-          - "Service      : {{ systemd_exporter_status.status.ActiveState }}"
-          - "Enabled      : {{ systemd_exporter_status.status.UnitFileState }}"
+          - "Service      : ACTIVE"
+          - "Enabled      : YES"
           - "Metrics      : http://{{ ansible_host | default(inventory_hostname) }}:{{ systemd_exporter_port }}/metrics"
           - "============================================================"
 
-
-  # ============================================================
-  # HANDLER
-  # ============================================================
 
   handlers:
 
